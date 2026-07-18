@@ -8,9 +8,14 @@ One-time setup:
 Run the current record (8xH100, ~$4-8 per run):
     modal run --detach modal_train.py
 
-Cheap smoke run — 1xH100, first 20% of training, val eval every 50 steps (~$1):
+Cheap smoke run — 1xH100, first third of training (all of stage 1), sparse val (~$1):
     NANOGPT_GPU='H100!:1' modal run --detach modal_train.py \
-        --stop-frac 0.2 --val-every 50 --run-id baseline-20pct
+        --stop-frac 0.33 --val-every 155 --run-id baseline-33pct
+
+    Keep --val-every sparse on truncated runs: val_tokens is fixed at 10.5M while the
+    stage-1 train batch is only ~131K tok/step, so each val eval costs ~30 training steps.
+    A few points (start/mid/end) beat every-50. stop_frac 0.33 covers all of stage 1;
+    the first 20% (~278 steps) never leaves it.
 
 Variations:
     modal run modal_train.py --script train_gpt_medium.py --chunks 30   # GPT-2 medium track
