@@ -49,12 +49,16 @@ x[t] += sum_d  lambda_d * sigmoid(W_d @ x_embed[t][:12]) * x_embed[t-d]
   front-padded embeddings:
 
   ```python
-  gates = smear_lambdas * torch.sigmoid(self.smear_gate(x[:, :12]))  # (T, k)
+  gates = smear_lambdas.bfloat16() * torch.sigmoid(self.smear_gate(x[:, :12]))  # (T, k)
   xp = F.pad(x, (0, 0, k, 0))                     # k zero rows absorb t-d < 0
   shifts = xp.as_strided((k, T, D), (D, D, 1))    # shifts[e, t] = x[t-(k-e)], no copy
   x = x + torch.einsum('etc,te->tc', shifts, gates)
   ```
 
+  The `.bfloat16()` cast is required, not stylistic: einsum does not type-promote
+  ("expected scalar type BFloat16 but found Float"), and the fp32 `(k,)` lambdas
+  would otherwise promote the gates. Master got away without a cast only because
+  its `smear_lambda` is 0-dim, and scalar promotion keeps bf16.
   Gate column e maps to offset k−e (column semantics are ours to assign;
   zero-init makes the ordering arbitrary). Zero-padding replaces PR #130's
   `torch.cat` prefix trick: out-of-range terms contribute exactly 0. An
