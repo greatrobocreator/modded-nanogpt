@@ -43,12 +43,26 @@ x[t] += sum_d  lambda_d * sigmoid(W_d @ x_embed[t][:12]) * x_embed[t-d]
 - All contributions read the *original* embeddings (`x_embed`), and all gates read
   the original current-token embedding — no compositional cascading, matching
   PR #130 semantics at k=1.
-- `smear_gate` becomes `nn.Linear(12, k)`, zero-init (column d gates offset d).
+- The sum over d is math notation, not the implementation. Everything is matrix
+  ops: one `nn.Linear(12, k)` matmul produces all k gates, and the shifted
+  weighted sum is one einsum over a zero-copy `as_strided` view of the
+  front-padded embeddings:
+
+  ```python
+  gates = smear_lambdas * torch.sigmoid(self.smear_gate(x[:, :12]))  # (T, k)
+  xp = F.pad(x, (0, 0, k, 0))                     # k zero rows absorb t-d < 0
+  shifts = xp.as_strided((k, T, D), (D, D, 1))    # shifts[e, t] = x[t-(k-e)], no copy
+  x = x + torch.einsum('etc,te->tc', shifts, gates)
+  ```
+
+  Gate column e maps to offset k−e (column semantics are ours to assign;
+  zero-init makes the ordering arbitrary). Zero-padding replaces PR #130's
+  `torch.cat` prefix trick: out-of-range terms contribute exactly 0. An
+  unrolled add chain likely fuses to the same kernel under torch.compile —
+  benchmark both, step-time parity is the constraint.
 - `lambda_d`: k slots in `self.scalars` instead of 1. This shifts `skip_lambda`'s
   index and the pad size — update `init_misc` (`train_gpt.py:1269-1279`) and the
   forward unpack (`train_gpt.py:1363-1364`) together.
-- Positions t < d skip the d-th term (same `torch.cat` prefix trick, looped over d;
-  k ≤ 5 so the loop unrolls statically under compile).
 - Param group: existing `smear_gate` adam group (lr_mul 0.01) covers the wider
   Linear unchanged.
 - Doc boundaries: like PR #130, no masking across BOS in round 1 (noted as a
