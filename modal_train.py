@@ -15,7 +15,10 @@ Cheap smoke run — 1xH100, first 20% of training, val eval every 50 steps (~$1)
 Variations:
     modal run modal_train.py --script train_gpt_medium.py --chunks 30   # GPT-2 medium track
     NANOGPT_GPU='H100!:2' modal run modal_train.py                      # 1/2/4/8 GPUs
-    NANOGPT_TIMEOUT=7200 modal run modal_train.py                       # raise the 1h kill switch
+    NANOGPT_TIMEOUT=7200 modal run modal_train.py                       # pin the kill switch (else auto)
+
+The kill-switch timeout is computed per run from stop_frac, GPU count, and whether the torch
+inductor cache is already warm in the volume (see _timeout_seconds), instead of a flat 1h.
 
 The --stop-frac / --val-every / --run-evals / --run-id knobs are wired into train_gpt.py
 via NANOGPT_* env vars (train_gpt_medium.py ignores them). Schedules always span the full
@@ -34,8 +37,27 @@ from pathlib import Path
 import modal
 
 GPU_CONFIG = os.environ.get("NANOGPT_GPU", "H100!:8")
-TIMEOUT_S = int(os.environ.get("NANOGPT_TIMEOUT", "3600"))
 NPROC = int(GPU_CONFIG.rsplit(":", 1)[1]) if ":" in GPU_CONFIG else 1
+
+# Full (stop_frac=1) pure-training wall-clock estimate on ONE H100. Observed stage-1 rate is
+# ~241 ms/step; later stages use 2-3x larger batches (~2-4x/step), so a full ~1390-step run lands
+# around 15-20 min on one H100. The kill-switch timeout derives from this (scaled by stop_frac,
+# GPU count, warm/cold) instead of a flat 1h; override entirely with NANOGPT_TIMEOUT.
+FULL_TRAIN_MIN = 18.0
+
+
+def _timeout_seconds(stop_frac: float, nproc: int, warm: bool) -> int:
+    """Startup/compile overhead + training time scaled by stop_frac, times a safety margin.
+
+    warm = torch inductor cache already sits in the volume, so the cold-compile term is dropped
+    and the (short) budget gets a wider 2x margin; a cold run pays ~7min compile at a 1.5x margin.
+    """
+    train_min = (FULL_TRAIN_MIN / max(nproc, 1)) * min(stop_frac, 1.0)
+    budget_min = train_min * 2 if warm else (7.0 + train_min) * 1.5
+    return int(budget_min * 60)
+
+
+TIMEOUT_S = int(os.environ.get("NANOGPT_TIMEOUT", "0")) or _timeout_seconds(1.0, NPROC, warm=False)
 
 REPO_ROOT = Path(__file__).parent
 REMOTE_REPO = "/root/modded-nanogpt"
@@ -44,8 +66,20 @@ VOL_PATH = "/vol"
 app = modal.App("modded-nanogpt")
 volume = modal.Volume.from_name("modded-nanogpt-data", create_if_missing=True)
 
+
+def _inductor_cache_warm() -> bool:
+    try:
+        return any(True for _ in volume.iterdir("cache/inductor"))
+    except Exception:
+        return False
+
+
+# triton_kernels.py compiles a custom CE CUDA kernel at import via torch.cuda._compile_kernel,
+# which needs nvcc + CUDA headers at /usr/local/cuda. debian_slim + pip-torch has neither, so
+# we base on NVIDIA's CUDA devel image (12.8 matches torch 2.10's bundled NVRTC).
 image = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12")
+    .entrypoint([])
     .apt_install("git", "build-essential")
     .pip_install_from_requirements(str(REPO_ROOT / "requirements.txt"))
     .env(
@@ -55,6 +89,7 @@ image = (
             "HF_HOME": f"{VOL_PATH}/hf",
             "TORCHINDUCTOR_CACHE_DIR": f"{VOL_PATH}/cache/inductor",
             "TRITON_CACHE_DIR": f"{VOL_PATH}/cache/triton",
+            "CUDA_HOME": "/usr/local/cuda",
         }
     )
     .add_local_dir(
@@ -141,8 +176,18 @@ def main(
     print(download_data.remote(chunks))
     if download_only:
         return
+    warm = _inductor_cache_warm()
+    timeout_s = (
+        int(os.environ["NANOGPT_TIMEOUT"])
+        if os.environ.get("NANOGPT_TIMEOUT")
+        else _timeout_seconds(stop_frac, NPROC, warm)
+    )
     print(
-        train.remote(
+        f"kill-switch timeout: {timeout_s // 60} min "
+        f"({'warm' if warm else 'cold'} start, stop_frac={stop_frac}, nproc={NPROC})"
+    )
+    print(
+        train.with_options(timeout=timeout_s).remote(
             script=script,
             nproc=NPROC,
             stop_frac=stop_frac,
