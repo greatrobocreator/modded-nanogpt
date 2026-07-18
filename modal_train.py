@@ -8,10 +8,18 @@ One-time setup:
 Run the current record (8xH100, ~$4-8 per run):
     modal run --detach modal_train.py
 
+Cheap smoke run — 1xH100, first 20% of training, val eval every 50 steps (~$1):
+    NANOGPT_GPU='H100!:1' modal run --detach modal_train.py \
+        --stop-frac 0.2 --val-every 50 --run-id baseline-20pct
+
 Variations:
     modal run modal_train.py --script train_gpt_medium.py --chunks 30   # GPT-2 medium track
-    NANOGPT_GPU='H100!:2' modal run modal_train.py                      # cheaper debug runs (1/2/4/8 GPUs)
+    NANOGPT_GPU='H100!:2' modal run modal_train.py                      # 1/2/4/8 GPUs
     NANOGPT_TIMEOUT=7200 modal run modal_train.py                       # raise the 1h kill switch
+
+The --stop-frac / --val-every / --run-evals / --run-id knobs are wired into train_gpt.py
+via NANOGPT_* env vars (train_gpt_medium.py ignores them). Schedules always span the full
+run, so a truncated run reproduces the first N% of a full run's dynamics exactly.
 
 Logs land in the volume; list and fetch them with:
     modal volume ls modded-nanogpt-data logs
@@ -81,11 +89,28 @@ def download_data(num_chunks: int = 9) -> str:
 
 
 @app.function(image=image, gpu=GPU_CONFIG, volumes={VOL_PATH: volume}, timeout=TIMEOUT_S)
-def train(script: str = "train_gpt.py", nproc: int = 8) -> str:
+def train(
+    script: str = "train_gpt.py",
+    nproc: int = 8,
+    stop_frac: float = 1.0,
+    val_every: int = 0,
+    run_evals: bool = False,
+    run_id: str = "",
+) -> str:
     os.chdir(REMOTE_REPO)
+    env = os.environ.copy()
+    if stop_frac < 1:
+        env["NANOGPT_STOP_FRAC"] = str(stop_frac)
+    if val_every:
+        env["NANOGPT_VAL_EVERY"] = str(val_every)
+    if run_evals:
+        env["NANOGPT_RUN_EVALS"] = "1"
+    if run_id:
+        env["NANOGPT_RUN_ID"] = run_id
     subprocess.run(
         ["torchrun", "--standalone", f"--nproc_per_node={nproc}", script],
         check=True,
+        env=env,
     )
     saved = []
     for src in sorted(Path("logs").iterdir()):
@@ -104,9 +129,26 @@ def train(script: str = "train_gpt.py", nproc: int = 8) -> str:
 
 
 @app.local_entrypoint()
-def main(script: str = "train_gpt.py", chunks: int = 9, download_only: bool = False) -> None:
+def main(
+    script: str = "train_gpt.py",
+    chunks: int = 9,
+    download_only: bool = False,
+    stop_frac: float = 1.0,
+    val_every: int = 0,
+    run_evals: bool = False,
+    run_id: str = "",
+) -> None:
     print(download_data.remote(chunks))
     if download_only:
         return
-    print(train.remote(script=script, nproc=NPROC))
+    print(
+        train.remote(
+            script=script,
+            nproc=NPROC,
+            stop_frac=stop_frac,
+            val_every=val_every,
+            run_evals=run_evals,
+            run_id=run_id,
+        )
+    )
     print("fetch logs with: modal volume get modded-nanogpt-data logs/<run_id>.txt")
