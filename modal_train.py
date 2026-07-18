@@ -22,8 +22,8 @@ Variations:
     NANOGPT_GPU='H100!:2' modal run modal_train.py                      # 1/2/4/8 GPUs
     NANOGPT_TIMEOUT=7200 modal run modal_train.py                       # pin the kill switch (else auto)
 
-The kill-switch timeout is computed per run from stop_frac, GPU count, and whether the torch
-inductor cache is already warm in the volume (see _timeout_seconds), instead of a flat 1h.
+The kill-switch timeout is computed per run from stop_frac and GPU count (see _timeout_seconds):
+a fixed compile+warmup allowance plus training time that scales with the run, instead of a flat 1h.
 
 The --stop-frac / --val-every / --run-evals / --run-id knobs are wired into train_gpt.py
 via NANOGPT_* env vars (train_gpt_medium.py ignores them). Schedules always span the full
@@ -46,23 +46,22 @@ NPROC = int(GPU_CONFIG.rsplit(":", 1)[1]) if ":" in GPU_CONFIG else 1
 
 # Full (stop_frac=1) pure-training wall-clock estimate on ONE H100. Observed stage-1 rate is
 # ~241 ms/step; later stages use 2-3x larger batches (~2-4x/step), so a full ~1390-step run lands
-# around 15-20 min on one H100. The kill-switch timeout derives from this (scaled by stop_frac,
-# GPU count, warm/cold) instead of a flat 1h; override entirely with NANOGPT_TIMEOUT.
+# around 15-20 min on one H100. Override the timeout entirely with NANOGPT_TIMEOUT.
 FULL_TRAIN_MIN = 18.0
 
+# Every fresh container pays a torch.compile + Triton/inductor autotune + schedule-warmup phase
+# before step 0. The volume inductor cache speeds kernel *compilation* but does NOT remove this
+# phase (observed 7-13+ min, high variance), so the timeout always budgets for it.
+COMPILE_WARMUP_MIN = 15.0
 
-def _timeout_seconds(stop_frac: float, nproc: int, warm: bool) -> int:
-    """Startup/compile overhead + training time scaled by stop_frac, times a safety margin.
 
-    warm = torch inductor cache already sits in the volume, so the cold-compile term is dropped
-    and the (short) budget gets a wider 2x margin; a cold run pays ~7min compile at a 1.5x margin.
-    """
+def _timeout_seconds(stop_frac: float, nproc: int) -> int:
+    """Compile+warmup allowance plus training time scaled by stop_frac/GPU count, with margin."""
     train_min = (FULL_TRAIN_MIN / max(nproc, 1)) * min(stop_frac, 1.0)
-    budget_min = train_min * 2 if warm else (7.0 + train_min) * 1.5
-    return int(budget_min * 60)
+    return int((COMPILE_WARMUP_MIN + train_min) * 1.3 * 60)
 
 
-TIMEOUT_S = int(os.environ.get("NANOGPT_TIMEOUT", "0")) or _timeout_seconds(1.0, NPROC, warm=False)
+TIMEOUT_S = int(os.environ.get("NANOGPT_TIMEOUT", "0")) or _timeout_seconds(1.0, NPROC)
 
 REPO_ROOT = Path(__file__).parent
 REMOTE_REPO = "/root/modded-nanogpt"
@@ -70,13 +69,6 @@ VOL_PATH = "/vol"
 
 app = modal.App("modded-nanogpt")
 volume = modal.Volume.from_name("modded-nanogpt-data", create_if_missing=True)
-
-
-def _inductor_cache_warm() -> bool:
-    try:
-        return any(True for _ in volume.iterdir("cache/inductor"))
-    except Exception:
-        return False
 
 
 # triton_kernels.py compiles a custom CE CUDA kernel at import via torch.cuda._compile_kernel,
@@ -181,16 +173,12 @@ def main(
     print(download_data.remote(chunks))
     if download_only:
         return
-    warm = _inductor_cache_warm()
     timeout_s = (
         int(os.environ["NANOGPT_TIMEOUT"])
         if os.environ.get("NANOGPT_TIMEOUT")
-        else _timeout_seconds(stop_frac, NPROC, warm)
+        else _timeout_seconds(stop_frac, NPROC)
     )
-    print(
-        f"kill-switch timeout: {timeout_s // 60} min "
-        f"({'warm' if warm else 'cold'} start, stop_frac={stop_frac}, nproc={NPROC})"
-    )
+    print(f"kill-switch timeout: {timeout_s // 60} min (stop_frac={stop_frac}, nproc={NPROC})")
     print(
         train.with_options(timeout=timeout_s).remote(
             script=script,
