@@ -1708,14 +1708,14 @@ class Hyperparameters:
     num_scheduled_iterations: int = 1380  # number of steps to complete lr and ws schedule
     num_extension_iterations: int = 10  # number of steps to continue training at final lr and ws
     # evaluation and logging
-    run_id: str = f"{uuid.uuid4()}"
+    run_id: str = os.environ.get("NANOGPT_RUN_ID") or f"{uuid.uuid4()}"
     # Descriptive run_id for this iteration:
     #   - explicit sparse connectivity refactor (no generic loop)
     #   - (1 + m_r9) * x self-reference fuse on layer 9
     #   - backout_lambda fully removed (slot dropped from self.scalars; absorbed into MUDD bias init)
-    val_loss_every: int = 250  # every how many steps to evaluate val loss? 0 for only at the end
+    val_loss_every: int = int(os.environ.get("NANOGPT_VAL_EVERY", "250"))  # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint: bool = False
-    run_evals: bool = False  # run additional evaluations after training is completed
+    run_evals: bool = os.environ.get("NANOGPT_RUN_EVALS", "0") == "1"  # run additional evaluations after training is completed
     # bigram hash embedding
     bigram_vocab_size: int = 50304 * 15
     bigram_dim: int = 192
@@ -2123,12 +2123,14 @@ torch.cuda.synchronize()
 t0 = time.perf_counter()
 # begin training
 train_steps = training_schedule.total_steps
-for step in range(train_steps + 1):
-    last_step = (step == train_steps)
+# NANOGPT_STOP_FRAC < 1 truncates the run early; schedules still span the full train_steps
+stop_steps = min(train_steps, round(train_steps * float(os.environ.get("NANOGPT_STOP_FRAC", "1"))))
+for step in range(stop_steps + 1):
+    last_step = (step == stop_steps)
     training_manager.advance_schedule(step)
     # --------------- VALIDATION SECTION -----------------
     if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
-        if last_step:
+        if last_step and stop_steps == train_steps:
             training_manager.apply_final_ws_ext()
         # stop the clock
         torch.cuda.synchronize()
