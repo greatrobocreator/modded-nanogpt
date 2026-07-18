@@ -17,6 +17,11 @@ Cheap smoke run — 1xH100, first third of training (all of stage 1), sparse val
     A few points (start/mid/end) beat every-50. stop_frac 0.33 covers all of stage 1;
     the first 20% (~278 steps) never leaves it.
 
+Multi-token smear experiment (experiments/multi-token-smear/PLAN.md), run naming
+smear-k{K}-{smoke|full}-r{repeat}:
+    NANOGPT_GPU='H100!:1' modal run --detach modal_train.py \
+        --stop-frac 0.33 --val-every 155 --smear-k 3 --run-id smear-k3-smoke-r1
+
 Variations:
     modal run modal_train.py --script train_gpt_medium.py --chunks 30   # GPT-2 medium track
     NANOGPT_GPU='H100!:2' modal run modal_train.py                      # 1/2/4/8 GPUs
@@ -25,9 +30,9 @@ Variations:
 The kill-switch timeout is computed per run from stop_frac, GPU count, and whether the torch
 inductor cache is already warm in the volume (see _timeout_seconds), instead of a flat 1h.
 
-The --stop-frac / --val-every / --run-evals / --run-id knobs are wired into train_gpt.py
-via NANOGPT_* env vars (train_gpt_medium.py ignores them). Schedules always span the full
-run, so a truncated run reproduces the first N% of a full run's dynamics exactly.
+The --stop-frac / --val-every / --run-evals / --run-id / --smear-k knobs are wired into
+train_gpt.py via NANOGPT_* env vars (train_gpt_medium.py ignores them). Schedules always span
+the full run, so a truncated run reproduces the first N% of a full run's dynamics exactly.
 
 Logs land in the volume; list and fetch them with:
     modal volume ls modded-nanogpt-data logs
@@ -136,6 +141,7 @@ def train(
     val_every: int = 0,
     run_evals: bool = False,
     run_id: str = "",
+    smear_k: int = 0,
 ) -> str:
     os.chdir(REMOTE_REPO)
     env = os.environ.copy()
@@ -147,6 +153,8 @@ def train(
         env["NANOGPT_RUN_EVALS"] = "1"
     if run_id:
         env["NANOGPT_RUN_ID"] = run_id
+    if smear_k:
+        env["NANOGPT_SMEAR_K"] = str(smear_k)
     subprocess.run(
         ["torchrun", "--standalone", f"--nproc_per_node={nproc}", script],
         check=True,
@@ -177,6 +185,7 @@ def main(
     val_every: int = 0,
     run_evals: bool = False,
     run_id: str = "",
+    smear_k: int = 0,
 ) -> None:
     print(download_data.remote(chunks))
     if download_only:
@@ -199,6 +208,7 @@ def main(
             val_every=val_every,
             run_evals=run_evals,
             run_id=run_id,
+            smear_k=smear_k,
         )
     )
     print("fetch logs with: modal volume get modded-nanogpt-data logs/<run_id>.txt")
