@@ -74,7 +74,7 @@ Configs: **k = 1 (control, must reproduce master), 2, 3, 5.**
 Instrumentation (the cheap signal): at the final step, rank 0 prints per-offset
 `lambda_d` and the mean sigmoid gate activation over the last val batch. Smoke runs
 can't resolve 0.001 final-loss effects, but they *can* show whether the model grows
-nonzero weight on d > 1 by 20% of training.
+nonzero weight on d > 1 within the first third of training.
 
 ## Protocol
 
@@ -87,8 +87,9 @@ batches only after that review signs off on which configs earned one.
 
 1. **k=1 regression check** — one smoke run; loss curve must overlay master's
    baseline smoke within noise, step time neutral, no compile graph breaks.
-2. **3 smoke repeats per config** (1×H100, `--stop-frac 0.2 --val-every 50`,
-   ~$0.5-1 each): no NaN, loss-curve sanity vs baseline band, step time neutral,
+2. **3 smoke repeats per config** (1×H100, `--stop-frac 0.33 --val-every 155`,
+   ~$1 each — covers all of stage 1 with sparse val evals, per `modal_train.py`
+   guidance): no NaN, loss-curve sanity vs baseline band, step time neutral,
    record learned lambda_d / gate stats. Repeats capture run-to-run noise
    (runs are nondeterministic; there is no seed knob).
 3. **After approval: 1 full 8×H100 run per surviving config** (~$4.5 each):
