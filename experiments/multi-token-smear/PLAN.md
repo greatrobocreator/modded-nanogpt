@@ -67,18 +67,24 @@ nonzero weight on d > 1 by 20% of training.
 Infra: Modal launcher from the `modal-setup` branch (see `MODAL.md`).
 Run naming: `smear-k{K}-{smoke|full}-r{repeat}`.
 
+**Rule: no full 8×H100 run without explicit approval.** The default loop is
+hypothesis → smoke runs → review the results together; full runs are launched in
+batches only after that review signs off on which configs earned one.
+
 1. **k=1 regression check** — one smoke run; loss curve must overlay master's
    baseline smoke within noise, step time neutral, no compile graph breaks.
 2. **3 smoke repeats per config** (1×H100, `--stop-frac 0.2 --val-every 50`,
    ~$0.5-1 each): no NaN, loss-curve sanity vs baseline band, step time neutral,
    record learned lambda_d / gate stats. Repeats capture run-to-run noise
    (runs are nondeterministic; there is no seed knob).
-3. **1 full 8×H100 run per surviving config** (~$4.5 each): final val loss vs
-   baseline. A single run only *ranks* — treat differences < 2σ (σ ≈ 0.001 from
-   PR #130's data) as noise. Re-establish the baseline number with our own k=1
-   full run rather than quoting historical records (master and hardware moved).
-4. **Escalate to 8-10 full seeds** only if a config looks ≥ 0.002 better or we
-   want an upstreamable claim, per ClassicLarry's 10-run t-test methodology.
+3. **After approval: 1 full 8×H100 run per surviving config** (~$4.5 each):
+   final val loss vs baseline. A single run only *ranks* — treat differences
+   < 2σ (σ ≈ 0.001 from PR #130's data) as noise. Re-establish the baseline
+   number with our own k=1 full run rather than quoting historical records
+   (master and hardware moved).
+4. **Escalate to 8-10 full seeds** (again approval-gated) only if a config looks
+   ≥ 0.002 better or we want an upstreamable claim, per ClassicLarry's 10-run
+   t-test methodology.
 
 Estimated round-1 cost: ~10 smoke runs + up to 4 full runs ≈ **$25**.
 
