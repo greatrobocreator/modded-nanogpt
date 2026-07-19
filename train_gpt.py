@@ -1242,7 +1242,8 @@ class GPT(nn.Module):
             self.mlp_bank[:, 1, :, :].zero_()  # c_proj - zero init suggested by @Grad62304977
 
     def init_misc(self, model_dim, num_layers):
-        self.smear_gate = nn.Linear(12, 1, bias=False)
+        self.smear_k = args.smear_k
+        self.smear_gate = nn.Linear(12, self.smear_k, bias=False)
         nn.init.zeros_(self.smear_gate.weight)
 
         self.skip_gate = nn.Linear(12, 1, bias=False)
@@ -1266,12 +1267,12 @@ class GPT(nn.Module):
         # Per-(layer, head) learnable XSA gate; zero-init -> tanh(0)=0 disables XSA at step 0
         self.xsa_alphas = nn.Parameter(torch.zeros(num_layers, self.num_heads))
 
-        pad = (-num_layers * 2 - 2) % dist.get_world_size()
+        pad = (-num_layers * 2 - self.smear_k - 1) % dist.get_world_size()
         self.scalars = nn.Parameter(
             torch.cat(
                 [
                     *[torch.tensor([0.5, 1.0]) for _ in range(num_layers)],  # SA lambdas
-                    torch.zeros(1), # smear_lambda
+                    torch.zeros(self.smear_k),  # smear_lambdas, column e ↔ offset k−e
                     -1.5 * torch.ones(1),  # skip_lambda -> σ(-1.5) ≈ 0.18
                     torch.ones(pad),
                 ]
@@ -1360,8 +1361,8 @@ class GPT(nn.Module):
 
         # ---- Unbind parameters (avoid select_backward kernels) ----
         sa_lambdas = self.scalars[: 2 * self.num_layers].view(-1, 2)
-        smear_lambda = self.scalars[2 * self.num_layers]
-        skip_lambda = self.scalars[2 * self.num_layers + 1]
+        smear_lambdas = self.scalars[2 * self.num_layers : 2 * self.num_layers + self.smear_k]
+        skip_lambda = self.scalars[2 * self.num_layers + self.smear_k]
         resid_lambdas_attn = self.resid_lambdas[:, 0].bfloat16().unbind(0)
         resid_lambdas_mlp  = self.resid_lambdas[:, 1].bfloat16().unbind(0)
         post_lambdas_attn = self.post_lambdas[:, 0].bfloat16().unbind(0)
@@ -1400,9 +1401,14 @@ class GPT(nn.Module):
         ve = [None, ve[0], ve[1], *self.gate_filler_nones, ve[2], ve[3], ve[4]]
         assert len(ve) == self.num_layers
 
-        # smear token embed forward 1 position @classiclarryd
-        smear_gate_out = smear_lambda * torch.sigmoid(self.smear_gate(x[1:, :self.smear_gate.weight.size(-1)]))
-        x = torch.cat([x[:1], x[1:] + smear_gate_out * x[:-1]])
+        # smear the previous k token embeds into each position with per-offset content gates;
+        # k=1 reproduces the 1-position smear @classiclarryd. bfloat16() cast is load-bearing:
+        # einsum does not type-promote, and the (k,) fp32 lambdas would otherwise promote gates to fp32
+        k = self.smear_k
+        gates = smear_lambdas.bfloat16() * torch.sigmoid(self.smear_gate(x[:, :self.smear_gate.weight.size(-1)]))  # (T, k)
+        xp = F.pad(x, (0, 0, k, 0))  # k zero rows absorb t-d < 0
+        shifts = xp.as_strided((k, x.size(0), x.size(1)), (x.size(1), x.size(1), 1))  # shifts[e, t] = x[t-(k-e)]
+        x = x + torch.einsum('etc,te->tc', shifts, gates)
         x = x0 = norm(x[None])
 
         # Initialize residual stream with pre-layer-0 bigram injection
@@ -1716,6 +1722,8 @@ class Hyperparameters:
     val_loss_every: int = int(os.environ.get("NANOGPT_VAL_EVERY", "250"))  # every how many steps to evaluate val loss? 0 for only at the end
     save_checkpoint: bool = False
     run_evals: bool = os.environ.get("NANOGPT_RUN_EVALS", "0") == "1"  # run additional evaluations after training is completed
+    # multi-token smear: how many previous tokens are smeared into each position
+    smear_k: int = int(os.environ.get("NANOGPT_SMEAR_K", "1"))
     # bigram hash embedding
     bigram_vocab_size: int = 50304 * 15
     bigram_dim: int = 192
@@ -2148,6 +2156,21 @@ for step in range(stop_steps + 1):
         del val_loader
         dist.reduce(val_loss, 0, op=dist.ReduceOp.AVG)
         print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
+        if last_step:
+            # per-offset smear readout on the last val batch: learned lambda_d, gate mean, and gate std
+            # (std separates a dead gate from a live gate balanced around 0.5, which the mean alone cannot)
+            with torch.no_grad():
+                gate = torch.sigmoid(model.smear_gate(model.embed(inputs)[:, :model.smear_gate.weight.size(-1)])).float()
+            gate_mean, gate_std = gate.mean(0), gate.std(0)
+            dist.reduce(gate_mean, 0, op=dist.ReduceOp.AVG)
+            dist.reduce(gate_std, 0, op=dist.ReduceOp.AVG)
+            smear_lambdas = model.scalars[2 * model.num_layers : 2 * model.num_layers + model.smear_k]
+            stats = " ".join(
+                f"d={d}:lambda={smear_lambdas[model.smear_k - d]:.4f},gate={gate_mean[model.smear_k - d]:.4f}±{gate_std[model.smear_k - d]:.4f}"
+                for d in range(1, model.smear_k + 1)
+            )
+            print0(f"smear per-offset stats: {stats}", console=True)
+            print0(f"smear gate weight norm: {model.smear_gate.weight.float().norm():.6f}", console=True)
         model.train()
         # start the clock again
         torch.cuda.synchronize()
