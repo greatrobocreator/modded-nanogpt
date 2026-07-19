@@ -1,5 +1,61 @@
 # Multi-token smear — results
 
+## Round 1 full runs (2026-07-19)
+
+9 full runs: k ∈ {1, 2, 3} × 3 repeats, **1×H100**, 1390 steps, `--val-every 155`.
+1×H100 chosen over 8×H100 for the loss ablation: grad accumulation keeps the token
+schedule identical, and the ~7-min compile warmup is paid on 1 GPU instead of 8
+(~$1.5/run vs ~$5). k=5 held pending a clean step-time check. Plots:
+`plots/loss_curves_full.png`, `plots/final_loss_full.png` (from `plot_results.py`).
+
+### Final val loss @ step 1390
+
+| config | runs | mean ± sd |
+|---|---|---|
+| k=1 | 3.2760 / 3.2790 / 3.2817 | 3.2789 ± 0.0029 |
+| k=2 | 3.2757 / 3.2801 / 3.2795 | 3.2784 ± 0.0024 |
+| k=3 | 3.2796 / 3.2780 / 3.2768 | 3.2781 ± 0.0014 |
+
+Monotone trend in the hypothesized direction (k=3 −0.0008 vs k=1) but ~0.4σ of the
+difference SE (±0.0018): **statistically a dead heat at n=3**. Per the plan's
+criterion (escalate only if ≥ 0.002 better), this does not justify a 10-seed
+record-attempt campaign on loss grounds alone.
+
+### Per-offset lambdas at 100% of training (mean ± sd over 3 runs)
+
+| config | λ₁ | λ₂ | λ₃ |
+|---|---|---|---|
+| k=1 | 0.2223 ± 0.0030 | | |
+| k=2 | 0.2338 ± 0.0094 | 0.0457 ± 0.0079 | |
+| k=3 | 0.2336 ± 0.0033 | 0.0490 ± 0.0052 | 0.0233 ± 0.0040 |
+
+Trajectory vs the 33% smoke readout: λ₁ decayed (0.32-0.36 → 0.22-0.23), λ₂ held
+(≈ 0.046-0.049 at both points), **λ₃ doubled** (0.011 → 0.023) — longer offsets gain
+weight in the later stages (larger windows/sequences). The λ₁-grows-with-k effect
+persists but compressed (0.222 → 0.234).
+
+### Gate verdict at 100% of training
+
+`gate mean ≈ 0.500-0.5015, std ≈ 0.006 (d=1) / 0.003 (d=2) / 0.002 (d=3)`, weight
+norm ≈ 0.09-0.12 for every config. The content gate wakes up but modulates by well
+under ±2% — **effectively a constant 0.5 multiplier even at full training**. The
+round-2 static-kernel ablation (drop the gate) is strongly motivated.
+
+### Step time
+
+Modal H100 hosts are bimodal (~240 vs ~310 ms/step stage-1 floors across identical
+configs). k=2 matched k=1 at every stage (237/444/650 vs 240/438/632 ms). All three
+k=3 full runs landed on slow hosts (311/607/892), but the two clean k=3 *smoke* runs
+at ~241 ms already bound the k=3 kernel at ≈ neutral — placement luck, not kernel
+cost. Any record claim still requires an 8×H100 confirmation run.
+
+### Observation: stage-transition robustness
+
+At the step-465 val (right at the stage-1→2 window/seq jump), k=2 was lower than
+every k=1 run (4.254-4.275 vs 4.279-4.375, and k=1's spread there is wide). By step
+620 the gap is gone. Weak evidence (n=3) that the smear buffers the transition;
+not load-bearing for any decision.
+
 ## Round 1 smoke runs (2026-07-19)
 
 12 runs: k ∈ {1, 2, 3, 5} × 3 repeats, 1×H100, `--stop-frac 0.33 --val-every 155`
