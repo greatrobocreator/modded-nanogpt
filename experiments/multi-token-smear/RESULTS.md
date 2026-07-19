@@ -49,6 +49,46 @@ k=3 full runs landed on slow hosts (311/607/892), but the two clean k=3 *smoke* 
 at ~241 ms already bound the k=3 kernel at ≈ neutral — placement luck, not kernel
 cost. Any record claim still requires an 8×H100 confirmation run.
 
+### Speed vs loss: the speedrun trade-off
+
+The speedrun currency is wall-clock to val 3.28, so the loss edge must be converted
+to steps and weighed against the kernel's step-time cost.
+
+**Steps to reach 3.28** (linear interp/extrap on the 1240→1390 segment):
+
+| config | crossing step (3 runs) | mean ± sd | vs k=1 |
+|---|---|---|---|
+| k=1 | 1380.0 / 1387.5 / 1394.2 | 1387.3 ± 7.1 | — |
+| k=2 | 1379.3 / 1390.2 / 1388.7 | 1386.1 ± 5.9 | −1.2 (se 5.3) |
+| k=3 | 1389.0 / 1385.0 / 1382.1 | 1385.4 ± 3.5 | −1.9 (se 4.6) |
+
+End-of-run slope is ~0.40 mloss/step for every config, so 0.001 of final loss ≈ 2.5
+steps. The k=3 edge (−0.0008) ≈ **2 saved steps ≈ 1.3 s of stage-3 time** on a
+~607 s pure-training run (clean 1×H100 host) — a 0.2% budget.
+
+**Break-even step-time overhead ≈ +0.2%.** Net wall-clock at k=3's loss edge:
+
+| smear overhead | net vs k=1 |
+|---|---|
+| 0.0% | ≈ −1.3 s (win) |
+| +0.2% | wash |
+| +0.5% | ≈ +1.7 s (loss) |
+| +1.0% | ≈ +4.8 s (loss) |
+
+Measured overhead is unresolvable at this precision: fast-host runs differ by ±1.5%
+between k=1 hosts themselves (k1-r1 646-650 ms/step stage 3 vs k1-r2/r3 632; the one
+fast-host k=2 run sits inside that spread — faster than k=1 in stage 1, slower in
+stage 3). The arithmetic estimate (extra memory traffic ≈ k·T·D reads) puts the true
+cost at ~0.1–0.3% — right at break-even.
+
+**Verdict: no wall-clock case for a record attempt from round 1.** The candidate
+gain (~1–2 s) is smaller than every relevant noise floor (crossing-step se ≈ 5
+steps, host variance ±1.5%). An upstreamable claim would need a ~10-seed loss
+confirmation (~$30) *plus* an 8×H100 step-time A/B (per-GPU T is 8× smaller on the
+record config, so relative kernel overhead is larger there) — not justified by a
+−0.0008 ± 0.0018 signal. The scientific readout (λ profile, dead gates) stands on
+its own; the wall-clock case does not.
+
 ### Observation: stage-transition robustness
 
 At the step-465 val (right at the stage-1→2 window/seq jump), k=2 was lower than
