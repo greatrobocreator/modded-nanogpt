@@ -2157,16 +2157,20 @@ for step in range(stop_steps + 1):
         dist.reduce(val_loss, 0, op=dist.ReduceOp.AVG)
         print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
         if last_step:
-            # per-offset smear readout: learned lambda_d and mean gate activation on the last val batch
+            # per-offset smear readout on the last val batch: learned lambda_d, gate mean, and gate std
+            # (std separates a dead gate from a live gate balanced around 0.5, which the mean alone cannot)
             with torch.no_grad():
-                gate_mean = torch.sigmoid(model.smear_gate(model.embed(inputs)[:, :model.smear_gate.weight.size(-1)])).float().mean(0)
+                gate = torch.sigmoid(model.smear_gate(model.embed(inputs)[:, :model.smear_gate.weight.size(-1)])).float()
+            gate_mean, gate_std = gate.mean(0), gate.std(0)
             dist.reduce(gate_mean, 0, op=dist.ReduceOp.AVG)
+            dist.reduce(gate_std, 0, op=dist.ReduceOp.AVG)
             smear_lambdas = model.scalars[2 * model.num_layers : 2 * model.num_layers + model.smear_k]
             stats = " ".join(
-                f"d={d}:lambda={smear_lambdas[model.smear_k - d]:.4f},gate={gate_mean[model.smear_k - d]:.4f}"
+                f"d={d}:lambda={smear_lambdas[model.smear_k - d]:.4f},gate={gate_mean[model.smear_k - d]:.4f}±{gate_std[model.smear_k - d]:.4f}"
                 for d in range(1, model.smear_k + 1)
             )
             print0(f"smear per-offset stats: {stats}", console=True)
+            print0(f"smear gate weight norm: {model.smear_gate.weight.float().norm():.6f}", console=True)
         model.train()
         # start the clock again
         torch.cuda.synchronize()
